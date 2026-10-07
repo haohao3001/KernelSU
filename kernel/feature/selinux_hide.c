@@ -1,5 +1,6 @@
 #include "selinux_hide.h"
 #include "infra/symbol_resolver.h"
+#include "kallrecon/dynsym.h"
 #include "linux/jump_label.h"
 #include "selinux/sepolicy.h"
 #include <linux/cred.h>
@@ -91,7 +92,7 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
     ssize_t length;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-    length = avc_has_perm(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
+    length = avc_has_perm(ksu_current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
     if (length)
         goto out;
     length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL);
@@ -110,7 +111,7 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
         goto out;
     }
 #else
-    length = avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY,
+    length = avc_has_perm(ksu_selinux_state, ksu_current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY,
                           SECURITY__CHECK_CONTEXT, NULL);
     if (length)
         goto out;
@@ -144,10 +145,10 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
     ssize_t length;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-    length = avc_has_perm(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
+    length = avc_has_perm(ksu_current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
 #else
     length =
-        avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
+        avc_has_perm(ksu_selinux_state, ksu_current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
 #endif
     if (length)
         goto out;
@@ -214,12 +215,12 @@ static int __nocfi my_setprocattr(const char *name, void *value, size_t size)
     if (strcmp(name, "current")) {
         goto call_orig;
     }
-    mysid = current_sid();
+    mysid = ksu_current_sid();
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
     error = avc_has_perm(mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
 #else
-    error = avc_has_perm(&selinux_state, mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
+    error = avc_has_perm(ksu_selinux_state, mysid, mysid, SECCLASS_PROCESS, PROCESS__SETCURRENT, NULL);
 #endif
     if (error) {
         return error;
@@ -249,15 +250,15 @@ static struct page *fake_status = NULL;
 
 static void initialize_fake_status()
 {
-    mutex_lock(&selinux_state.status_lock);
+    mutex_lock(&ksu_selinux_state->status_lock);
     if (fake_status)
         goto out;
-    if (!selinux_state.status_page) {
+    if (!ksu_selinux_state->status_page) {
         pr_warn("initialize_fake_status: status_page not exist\n");
         goto out;
     }
 
-    struct selinux_kernel_status *status = page_address(selinux_state.status_page);
+    struct selinux_kernel_status *status = page_address(ksu_selinux_state->status_page);
     if (!status->enforcing && !ksu_late_loaded) {
         pr_warn("initialize_fake_status: skip not enforcing\n");
         goto out;
@@ -293,7 +294,7 @@ static void initialize_fake_status()
             new_status->policyload, new_status->enforcing);
 
 out:
-    mutex_unlock(&selinux_state.status_lock);
+    mutex_unlock(&ksu_selinux_state->status_lock);
 }
 
 typedef int (*sel_open_handle_status_fn)(struct inode *inode, struct file *filp);
@@ -302,9 +303,9 @@ static int my_sel_open_handle_status(struct inode *inode, struct file *filp)
 {
     if (likely(current_uid().val >= 10000 && ksu_selinux_hide_enabled)) {
         void *data;
-        mutex_lock(&selinux_state.status_lock);
+        mutex_lock(&ksu_selinux_state->status_lock);
         data = fake_status;
-        mutex_unlock(&selinux_state.status_lock);
+        mutex_unlock(&ksu_selinux_state->status_lock);
         if (data) {
             filp->private_data = data;
             return 0;
@@ -517,11 +518,11 @@ void __exit ksu_selinux_hide_exit()
     }
     mutex_unlock(&selinux_hide_mutex);
     ksu_unregister_feature_handler(KSU_FEATURE_SELINUX_HIDE);
-    mutex_lock(&selinux_state.status_lock);
+    mutex_lock(&ksu_selinux_state->status_lock);
     if (fake_status)
         __free_page(fake_status);
     fake_status = NULL;
-    mutex_unlock(&selinux_state.status_lock);
+    mutex_unlock(&ksu_selinux_state->status_lock);
 }
 
 void ksu_selinux_hide_drop_backup_if_unused()
